@@ -385,17 +385,68 @@ pub unsafe fn set_bytes(mut s: *mut u8, c: u8, mut n: usize) {
 }
 
 #[inline(always)]
-pub unsafe fn compare_bytes(s1: *const u8, s2: *const u8, n: usize) -> c_int {
-    let mut i = 0;
-    while i < n {
-        let a = *s1.wrapping_add(i);
-        let b = *s2.wrapping_add(i);
-        if a != b {
-            return c_int::from(a) - c_int::from(b);
+pub unsafe fn compare_bytes(mut s1: *const u8, mut s2: *const u8, mut n: usize) -> c_int {
+    // The following backward copy helper functions uses the pointers past the end
+    // as their inputs instead of pointers to the start!
+    #[inline(always)]
+    unsafe fn compare_bytes_bytes(mut s1: *const u8, mut s2: *const u8, n: usize) -> c_int {
+        let s1_end = s1.wrapping_add(n);
+
+        while s1 < s1_end {
+            if *s1 != *s2 {
+                return c_int::from(*s1) - c_int::from(*s2);
+            }
+            s1 = s1.wrapping_add(1);
+            s2 = s2.wrapping_add(1);
         }
-        i += 1;
+        0
     }
-    0
+
+    #[inline(always)]
+    unsafe fn compare_bytes_aligned_words(s1: *const u8, s2: *const u8, n: usize) -> c_int {
+        let mut s1_usize = s1 as *const usize;
+        let mut s2_usize = s2 as *const usize;
+        let s1_end = s1.wrapping_add(n) as *const usize;
+
+        while s1_usize < s1_end {
+            if *s1_usize != *s2_usize {
+                return compare_bytes_bytes(
+                    s1_usize as *const u8,
+                    s2_usize as *const u8,
+                    WORD_SIZE,
+                );
+            }
+            s1_usize = s1_usize.wrapping_add(1);
+            s2_usize = s2_usize.wrapping_add(1);
+        }
+        0
+    }
+
+    if n >= WORD_COPY_THRESHOLD {
+        // Align s1
+        // Because of n >= 2 * WORD_SIZE, s1_misalignment < n
+        let s1_misalignment = (s1 as usize).wrapping_neg() & WORD_MASK;
+        let misalignment_cmp = compare_bytes_bytes(s1, s2, s1_misalignment);
+        if misalignment_cmp != 0 {
+            return misalignment_cmp;
+        }
+        s1 = s1.wrapping_add(s1_misalignment);
+        s2 = s2.wrapping_add(s1_misalignment);
+        n -= s1_misalignment;
+
+        let n_words = n & !WORD_MASK;
+        let s2_misalignment = s2 as usize & WORD_MASK;
+        if likely(s2_misalignment == 0) {
+            let words_cmp = compare_bytes_aligned_words(s1, s2, n_words);
+            if words_cmp != 0 {
+                return words_cmp;
+            }
+            s1 = s1.wrapping_add(n_words);
+            s2 = s2.wrapping_add(n_words);
+            n -= n_words;
+        }
+    }
+    compare_bytes_bytes(s1, s2, n)
 }
 
 #[inline(always)]
